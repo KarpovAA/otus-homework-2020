@@ -3,7 +3,7 @@ import functools
 import time
 
 
-MAX_RETRIES_RECONNECT = 5
+MAX_RETRIES_RECONNECT = 3
 TIME_DELAY_TO_RECONNECT = 1     # ms
 
 
@@ -16,38 +16,49 @@ def retry(exceptions, retries=MAX_RETRIES_RECONNECT, time_delay=TIME_DELAY_TO_RE
                     return f(*args, **kwargs)
                 except exceptions as e:
                     time.sleep(time_delay)
+                    if n == retries:
+                        raise ConnectionError
         return wrapper
     return decorator
 
 
 class RedisStorage:
-    def __init__(self, host='172.17.0.2', port='6379', timeout=5):
+    def __init__(self, host='172.17.0.2', port='6379', timeout=1):
         self.host = host
         self.port = port
         self.timeout = timeout
         self.db = None
-        self.reconnect()
 
     def reconnect(self):
-        self.db = redis.StrictRedis(
-            host=self.host,
-            port=self.port,
-            db=0,
-            socket_timeout=self.timeout,
-            socket_connect_timeout=self.timeout,
-            decode_responses=True
-        )
+        try:
+            if not self.db:
+                self.db = redis.StrictRedis(
+                    host=self.host,
+                    port=self.port,
+                    db=0,
+                    socket_timeout=self.timeout,
+                    socket_connect_timeout=self.timeout,
+                    decode_responses=True
+                )
+        except Exception as e:
+            raise ConnectionError
 
     def get(self, key):
+        if not self.db:
+            self.reconnect()
         try:
             res = self.db.get(key)
         except redis.exceptions.TimeoutError:
             raise TimeoutError
         except redis.exceptions.ConnectionError:
             raise ConnectionError
+        except Exception as e:
+            raise e
         return res
 
     def set(self, key, value, expires=None):
+        if not self.db:
+            self.reconnect()
         try:
             self.db.set(key, value, ex=expires)
         except redis.exceptions.TimeoutError:
@@ -56,10 +67,11 @@ class RedisStorage:
             raise ConnectionError
 
 
-class Storage:
+class Storage():
     def __init__(self, storage):
         self.storage = storage
 
+    @retry((TimeoutError, ConnectionError))
     def get(self, key):
         return self.storage.get(key)
 

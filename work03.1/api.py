@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import json
@@ -6,8 +6,8 @@ import datetime
 import logging
 import hashlib
 import uuid
-from store import Storage, RedisStorage
-from scoring import get_interests, get_score
+from lib.store import Storage, RedisStorage
+from lib.scoring import get_interests, get_score
 from optparse import OptionParser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from weakref import WeakKeyDictionary
