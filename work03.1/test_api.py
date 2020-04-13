@@ -25,7 +25,7 @@ def cases(cases):
 
 class TestCharField(unittest.TestCase):
 
-    @cases(['test', '', None, 10])
+    @cases(['test', '', None])
     def test_valid_value(self, value):
         self.assertEqual(value, api.CharField(nullable=True).validate(value))
 
