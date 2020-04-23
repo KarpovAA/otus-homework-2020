@@ -67,7 +67,7 @@ class RedisStorage:
             raise ConnectionError
 
 
-class Storage():
+class Storage:
     def __init__(self, storage):
         self.storage = storage
 
@@ -75,6 +75,7 @@ class Storage():
     def get(self, key):
         return self.storage.get(key)
 
+    @retry((TimeoutError, ConnectionError))
     def set(self, key, value, time_expires=None):
         return self.storage.set(key, value, expires=time_expires)
 
