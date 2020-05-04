@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 # log_format ui_short '$remote_addr  $remote_user $http_x_real_ip [$time_local] "$request" '
@@ -6,11 +6,13 @@
 #                     '"$http_user_agent" "$http_x_forwarded_for" "$http_X_REQUEST_ID" "$http_X_RB_USER" '
 #                     '$request_time';
 import os
-import sys
 import re
 import logging
 import gzip
+import argparse
 import configparser
+from statistics import median
+from collections import defaultdict
 from string import Template
 from typing import Optional, Tuple, List, Dict, Callable
 
@@ -25,33 +27,26 @@ CONFIG_DEFAULT = {'config_filename': 'settings.ini',
                   'parsing_error': '50.0'}
 
 
-def get_config_filename(config: Dict) -> Optional[str]:
-    """ возвращает имя конфиг файла по умолчанию """
-    if config and 'config_filename' in config:
-        return config['config_filename']
-    return None
+def get_config_filename_from_cmd() -> str:
+    """ Возвращает имя конфиг файла из коммандной строки: --config <filename>."""
+    parser = argparse.ArgumentParser("Обработка лог-файлов и генерирование отчета")
+    parser.add_argument("--config", dest="config_path", default=None, help="Путь к конфигурационному файлу")
+    result = parser.parse_args()
+    return result.config_path
 
 
-def get_config_filename_from_cmd(cmd_args: Optional[List[str]]) -> Optional[str]:
-    """ возвращает имя конфиг файла из коммандной строки: --config <filename> """
-    config_filename_from_cmd = None
-    if cmd_args and ('--config' in cmd_args) and (cmd_args.index('--config') < len(cmd_args)-1):
-        config_filename_from_cmd = cmd_args[cmd_args.index('--config')+1]
-    return config_filename_from_cmd
-
-
-def get_config(config_def: Dict, cmd_args: List[str] = None) -> Optional[Dict]:
-    """ возвращает конфиг-словарь, с учетом параметров в конфиг файле и значений по умолчанию """
-    #print(config_def, cmd_args)
-    config_filename = get_config_filename(config_def)
-    config_filename_from_cmd = get_config_filename_from_cmd(cmd_args)
-    config_filename = config_filename_from_cmd or config_filename
-    if not config_def or not config_filename:
+def get_config(config_default: Dict, cmd_config_path: str = None) -> Optional[Dict]:
+    """ Возвращает конфиг-словарь, с учетом параметров в конфиг файле и значений по умолчанию."""
+    config_filename = None
+    if 'config_filename' in config_default:
+        config_filename = config_default.get('config_filename')
+    config_filename = cmd_config_path or config_filename
+    if not config_default or not config_filename:
         logging.error('Bad config filename')
         return None
     cfg = configparser.ConfigParser()
     try:
-        cfg['DEFAULT'] = dict(config_def)
+        cfg['MAIN'] = dict(config_default)
     except Exception:
         logging.exception('Bad CONFIG_DEFAULT')
         return None
@@ -61,12 +56,18 @@ def get_config(config_def: Dict, cmd_args: List[str] = None) -> Optional[Dict]:
         except Exception:
             logging.exception('Error load settings from ini file')
             return None
-        result = dict(cfg['DEFAULT'])
+        result = dict(cfg['MAIN'])
+
         try:
-            float(result['parsing_error'])
-            int(result['report_size'])
+            result['parsing_error'] = float(result['parsing_error'])
         except Exception:
-            logging.exception('Bad config parameters: parsing_error, report_size')
+            logging.exception('Bad config parameters: parsing_error')
+            return None
+
+        try:
+            result['report_size'] = int(result['report_size'])
+        except Exception:
+            logging.exception('Bad config parameters: report_size')
             return None
         return result
     logging.error('Ini file not found')
@@ -74,9 +75,9 @@ def get_config(config_def: Dict, cmd_args: List[str] = None) -> Optional[Dict]:
 
 
 def init_logging(logging_output: str = None) -> bool:
-    """ устанавливает формат записи в журнал логов программы
+    """ Устанавливает формат записи в журнал логов программы.
     :param logging_output: имя файла/потока для вывода журнала логов, при None - вывод в stdout
-    :return: True - если все успешно, False - в случае ошибки
+    :return: True - если все успешно, False - в случае ошибки.
     """
     try:
         logging.basicConfig(filename=str(logging_output),
@@ -91,12 +92,11 @@ def init_logging(logging_output: str = None) -> bool:
     return True
 
 
-def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional[str]:
-    """ возвращает имя последнего файла с логами NGINX
+def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional[Tuple]:
+    """ Возвращает имя последнего файла с логами NGINX.
     :param logs_dir: каталог с логами
     :param pattern_log_filename: шаблон имени файла с логами
-    :return: имя последнего файла с логами
-             или None - в случае ошибок
+    :return: Tuple[<имя последнего файла с логами>, <дата файла>] или None - в случае ошибок.
     """
     if not logs_dir or not os.path.isdir(logs_dir):
         logging.error('LOGs directory not found. LOG_DIR: %s' % logs_dir)
@@ -107,33 +107,36 @@ def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional
     except Exception:
         logging.exception('LOGs directory don`t open. LOG_DIR: "%s"' % logs_dir)
         return None
+    last_filename_date = ''
     for file in listdir:
         if re.match(pattern_log_filename, file):
-            if not last_filename or (re.findall(r'\d{8}', file) > re.findall(r'\d{8}', last_filename)):
+            f_date = re.findall(r'\d{8}', file)
+            filename_date = f_date[0]
+            if not last_filename_date or filename_date > last_filename_date:
                 last_filename = file
+                last_filename_date = filename_date
     if not last_filename:
         logging.info('LOGS files not found in directory')
         return None
-    return last_filename
+    return last_filename, last_filename_date
 
 
-def get_report_filename(log_filename: str) -> Optional[str]:
-    """ возвращает имя файла HTML отчёта в соответствии с именем файла с логами
-    :param log_filename: имя файла с логами NGINX
-    :return: имя файла с HTML отчётом или None - в случае ошибок
+def get_report_filename(log_filename_date: str) -> Optional[str]:
+    """ Возвращает имя файла HTML отчёта в соответствии с именем файла с логами.
+    :param log_filename_date: имя файла с логами NGINX
+    :return: имя файла с HTML отчётом или None - в случае ошибок.
     """
-    date = re.search(r'\d{8}', log_filename)
-    if not date:
+    if not log_filename_date:
         return None
-    date_str = date.group()
-    filename = '%s-%s.%s.%s.html' % ('report', date_str[0:4], date_str[4:6], date_str[6:8])
+    date_str = log_filename_date
+    filename = 'report-{}.{}.{}.html'.format(date_str[0:4], date_str[4:6], date_str[6:8])
     return filename
 
 
 def check_exist_reports_directory(report_dir: str) -> bool:
-    """ Проверяет наличие каталога с HTML отчетами
+    """ Проверяет наличие каталога с HTML отчетами.
     :param report_dir: каталог с отчетами
-    :return: True - каталог имеется или False - в случае ошибок
+    :return: True - каталог имеется или False - в случае ошибок.
     """
     if report_dir and os.path.exists(report_dir):
         if os.path.isdir(report_dir):
@@ -143,10 +146,10 @@ def check_exist_reports_directory(report_dir: str) -> bool:
 
 
 def check_exist_report_file(directory: str, filename: str) -> bool:
-    """ Проверяет наличие файл HTML отчета
+    """ Проверяет наличие файл HTML отчета.
     :param directory: каталог с отчетами
     :param filename: имя файла c HTML отчетом
-    :return: True или False - в случае ошибок
+    :return: True или False - в случае ошибок.
     """
     if filename:
         report_path = os.path.join(directory, filename)
@@ -155,26 +158,11 @@ def check_exist_report_file(directory: str, filename: str) -> bool:
     return False
 
 
-def get_median_value_from_list(list_values: List[float]) -> Optional[float]:
-    """ Возвращает медианное значение списка """
-    if not (len(list_values) > 0):
-        return None
-    sorted_list = sorted(list(list_values))
-    length = len(sorted_list)
-    center = length // 2
-    if length == 1:
-        return sorted_list[0]
-    elif length % 2 == 0:
-        return sum(sorted_list[center-1:center+1]) / 2
-    else:
-        return sorted_list[center]
-
-
 def parser_log_string(log_string: str) -> Optional[Tuple]:
-    """ Парсит строку лога NGINX и возвращает кортеж значений (<URL>, <time_request>)
+    """ Парсит строку лога NGINX и возвращает кортеж значений (<URL>, <time_request>).
     192.168.122.1 - - [20/Feb/2012:14:56:26 +0000] "GET /index.html HTTP/1.1" 304 0 "-" "http_user_agent" "-" 39.023
     :param log_string: строка лог файла
-    :return: tuple(url, request_time)
+    :return: tuple(url, request_time).
     """
     pattern_list = list()
     pattern_list.append(r'"(([^"]+)(\s+)([^"]+)(\s+)([^"]+))"')  # get ["GET /index.html HTTP/1.1"] from log_string
@@ -190,8 +178,9 @@ def parser_log_string(log_string: str) -> Optional[Tuple]:
 
 
 def get_func_open_file_by_extension(filename: str) -> Callable:
-    """" в зависимости от расширения файла возвращает функцию для открытия файла
-    gz - gzip.open, else open """
+    """" Возвращает функцию для открытия файлов в зависимости от расширения файла.
+    gz - gzip.open, else open.
+    """
     if re.search(r"[.]gz$", filename):
         return gzip.open
     else:
@@ -199,10 +188,10 @@ def get_func_open_file_by_extension(filename: str) -> Callable:
 
 
 def get_statistics_logs(log_dir: str, log_filename: str) -> Optional[Tuple[List[Dict], float]]:
-    """ читает и анализирует файл логов NGINX и возвращает данные по найденным URL и процент ошибок
+    """ Читает и анализирует файл логов NGINX и возвращает данные по найденным URL и процент ошибок
     :param log_dir: - каталог с логами NGINX
     :param log_filename: - имя файла с логами NGINX
-    :return tuple(list(dict), error_rate) или False - в случае ошибок
+    :return tuple(list(dict), error_rate) или False - в случае ошибок.
     """
     if not log_filename:
         return None
@@ -216,7 +205,7 @@ def get_statistics_logs(log_dir: str, log_filename: str) -> Optional[Tuple[List[
     count_error_string = 0                  # count of error string in LOG file
     count_log_string = 0                    # count string in LOG file
     time_sum = 0.0                          # sum of time_request in all URL
-    urls_time_request: Dict = {}      # словарь key=URL, value=list(time_request)
+    urls_time_request: defaultdict = defaultdict(list)      # словарь key=URL, value=list(time_request)
     # создаем генератор для построчного анализа лог файла на выходе tuple(<url>, <time_request>)
     list_res = map(parser_log_string, (line.rstrip() for line in file))
     # формируем словарь {<url>: list(<time_request>)}
@@ -227,9 +216,8 @@ def get_statistics_logs(log_dir: str, log_filename: str) -> Optional[Tuple[List[
             continue
         url = res[0]                        # URL - res[0]
         time_request = float(res[1])        # TIME_REQUEST - res[1]
-        if not urls_time_request.get(url):  # новый URL - > добавляем новый ключ
-            urls_time_request[url] = []
-        urls_time_request[url].append(time_request)     # добавляем в список time_request
+        # новый URL - > добавляем новый ключ, в список значений добавляем time_request
+        urls_time_request[url].append(time_request)
         time_sum += time_request
     file.close()
     result = []
@@ -244,18 +232,18 @@ def get_statistics_logs(log_dir: str, log_filename: str) -> Optional[Tuple[List[
         url_stat['time_max'] = max(value)
         url_stat['time_perc'] = round(url_stat['time_sum'] * 100 / (time_sum or 1), 2)  # div 0: if time_sum == 0
         url_stat['time_avg'] = url_stat['time_sum'] / (url_stat['count'])
-        median = get_median_value_from_list(value)
-        url_stat['time_med'] = median if median else 0
+        median_value = median(value)
+        url_stat['time_med'] = median_value
         result.append(url_stat)
     error = count_error_string * 100 / (count_log_string or 1)
     return result, error
 
 
-def get_limit_report(urls_statistics: Dict, report_size: int) -> Optional[List]:
-    """ возвращает данные для отчёта по URL с наибольшим временем обработки
-    :param urls_statistics: словарь с данными по всем URL из файла логов NGINX
+def get_limit_report(urls_statistics: List, report_size: int) -> Optional[List]:
+    """ Возвращает данные для отчёта по URL с наибольшим временем обработки.
+    :param urls_statistics: список словарейы с данными по всем URL из файла логов NGINX
     :param report_size: кол-во URL выводимых в отчет
-    :return: словарь с данными по URL или None - если исходный словарь пустой
+    :return: словарь с данными по URL или None - если исходный словарь пустой.
     """
     if not urls_statistics:
         return None
@@ -273,11 +261,11 @@ def get_limit_report(urls_statistics: Dict, report_size: int) -> Optional[List]:
 def save_report_to_html_file(report_path: str,
                              template_path: str,
                              report_data: List) -> bool:
-    """ Записывает отчетные табличные данные в HTML файл
+    """ Записывает отчетные табличные данные в HTML файл.
     :param report_path: - путь и имя файла с отчётом
     :param template_path: - путь и имя файла шаблона HTML отчета
     :param report_data: - отчет
-    :return:
+    :return: True - если данные успешно записаны в файл, иначе False.
     """
     try:
         template_html_file = open(template_path)
@@ -301,50 +289,59 @@ def save_report_to_html_file(report_path: str,
     return True
 
 
-def main():
-    config = get_config(CONFIG_DEFAULT, sys.argv)
-    if not config:
-        exit()
-    log_dir = config['log_dir']
-    report_dir = config['report_dir']
-    pattern_logs_filename = config['pattern_logs_filename']
-
-    logger = init_logging(config['logging_path'])
-    if not logger:
-        exit()
-    last_logs_filename = get_last_logs_filename(log_dir, pattern_logs_filename)
-    if not last_logs_filename:
-        exit()
-    report_filename = get_report_filename(last_logs_filename)
+def main(cfg: Dict):
+    if not cfg:
+        return
+    report_dir = cfg['report_dir']
+    logging_ok = init_logging(cfg['logging_path'])
+    if not logging_ok:
+        return
+    result = get_last_logs_filename(cfg['log_dir'], cfg['pattern_logs_filename'])
+    if not result:
+        return
+    last_logs_filename, last_logs_filename_date = result
+    report_filename = get_report_filename(last_logs_filename_date)
     if not report_filename:
-        exit()
+        return
     result_flag = check_exist_reports_directory(report_dir)
     if not result_flag:
-        exit()
+        try:
+            os.makedirs(report_dir)
+        except Exception:
+            logging.exception('Error creating report directory')
+            return
     result_flag = check_exist_report_file(report_dir, report_filename)
     if result_flag:         # файл отчета уже существует, повторный анализ не производим, выход
         logging.info('HTML report file already exists. Reanalysis canceled')
-        exit()
-    result_data = get_statistics_logs(log_dir, last_logs_filename)
+        return
+    result_data = get_statistics_logs(cfg['log_dir'], last_logs_filename)
     if not result_data:
-        exit()
+        return
     result_statistics, error_rate = result_data
-    if error_rate > float(config['parsing_error']):
+    if error_rate > float(cfg['parsing_error']):
         logging.error('To many bad LOGS in file. Exit')
-        exit()
-    report_data = get_limit_report(result_statistics, int(config['report_size']))
+        return
+    report_data = get_limit_report(result_statistics, int(cfg['report_size']))
     if not report_data:
-        exit()
+        return
 
     report_path = os.path.join(report_dir, report_filename)
-    report_template_path = os.path.join(config['report_template_dir'],
-                                        config['report_template_filename'])
+    report_template_path = os.path.join(cfg['report_template_dir'],
+                                        cfg['report_template_filename'])
     result_flag = save_report_to_html_file(report_path, report_template_path, report_data)
     if not result_flag:
-        exit()
+        return
     logging.info('Report successfully created: %s' % report_filename)
     print('Report successfully created: %s' % report_filename)
 
 
 if __name__ == "__main__":
-    main()
+    config_path_from_cmd = get_config_filename_from_cmd()
+    config = get_config(CONFIG_DEFAULT, config_path_from_cmd)
+    if not config:
+        print('Error getting config')
+    else:
+        try:
+            main(config)
+        except KeyboardInterrupt:
+            print('Execution is interrupted by pressing Control+C')
