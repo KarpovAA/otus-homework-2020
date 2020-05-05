@@ -6,13 +6,14 @@
 #                     '"$http_user_agent" "$http_x_forwarded_for" "$http_X_REQUEST_ID" "$http_X_RB_USER" '
 #                     '$request_time';
 import os
+import datetime
 import re
 import logging
 import gzip
 import argparse
 import configparser
 from statistics import median
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from string import Template
 from typing import Optional, Tuple, List, Dict, Callable
 
@@ -50,28 +51,27 @@ def get_config(config_default: Dict, cmd_config_path: str = None) -> Optional[Di
     except Exception:
         logging.exception('Bad CONFIG_DEFAULT')
         return None
-    if os.path.exists(config_filename) and os.path.isfile(config_filename):
-        try:
-            cfg.read(config_filename)
-        except Exception:
-            logging.exception('Error load settings from ini file')
-            return None
-        result = dict(cfg['MAIN'])
+    if not os.path.exists(config_filename) or not os.path.isfile(config_filename):
+        logging.error('Ini file not found')
+        return None
 
-        try:
-            result['parsing_error'] = float(result['parsing_error'])
-        except Exception:
-            logging.exception('Bad config parameters: parsing_error')
-            return None
-
-        try:
-            result['report_size'] = int(result['report_size'])
-        except Exception:
-            logging.exception('Bad config parameters: report_size')
-            return None
-        return result
-    logging.error('Ini file not found')
-    return None
+    try:
+        cfg.read(config_filename)
+    except Exception:
+        logging.exception('Error load settings from ini file')
+        return None
+    result = dict(cfg['MAIN'])
+    try:
+        result['parsing_error'] = float(result['parsing_error'])
+    except Exception:
+        logging.exception('Bad config parameters: parsing_error')
+        return None
+    try:
+        result['report_size'] = int(result['report_size'])
+    except Exception:
+        logging.exception('Bad config parameters: report_size')
+        return None
+    return result
 
 
 def init_logging(logging_output: str = None) -> bool:
@@ -99,19 +99,23 @@ def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional
     :return: Tuple[<имя последнего файла с логами>, <дата файла>] или None - в случае ошибок.
     """
     if not logs_dir or not os.path.isdir(logs_dir):
-        logging.error('LOGs directory not found. LOG_DIR: %s' % logs_dir)
+        logging.error(f'LOGs directory not found. LOG_DIR: "{logs_dir}"')
         return None
     last_filename = None
     try:
         listdir = os.listdir(logs_dir)
     except Exception:
-        logging.exception('LOGs directory don`t open. LOG_DIR: "%s"' % logs_dir)
+        logging.exception(f'LOGs directory don`t open. LOG_DIR: "{logs_dir}"')
         return None
-    last_filename_date = ''
+    last_filename_date = None
     for file in listdir:
         if re.match(pattern_log_filename, file):
             f_date = re.findall(r'\d{8}', file)
-            filename_date = f_date[0]
+            try:
+                filename_date = datetime.datetime.strptime(f_date[0], '%Y%m%d').date()
+            except Exception:
+                logging.exception(f'Error converting filename to date. File skipped "{file}"')
+                continue
             if not last_filename_date or filename_date > last_filename_date:
                 last_filename = file
                 last_filename_date = filename_date
@@ -121,28 +125,15 @@ def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional
     return last_filename, last_filename_date
 
 
-def get_report_filename(log_filename_date: str) -> Optional[str]:
+def get_report_filename(report_date: datetime.date) -> Optional[str]:
     """ Возвращает имя файла HTML отчёта в соответствии с именем файла с логами.
-    :param log_filename_date: имя файла с логами NGINX
+    :param report_date: имя файла с логами NGINX
     :return: имя файла с HTML отчётом или None - в случае ошибок.
     """
-    if not log_filename_date:
+    if not report_date:
         return None
-    date_str = log_filename_date
-    filename = 'report-{}.{}.{}.html'.format(date_str[0:4], date_str[4:6], date_str[6:8])
+    filename = 'report-{}.html'.format(report_date.strftime('%Y.%m.%d'))
     return filename
-
-
-def check_exist_reports_directory(report_dir: str) -> bool:
-    """ Проверяет наличие каталога с HTML отчетами.
-    :param report_dir: каталог с отчетами
-    :return: True - каталог имеется или False - в случае ошибок.
-    """
-    if report_dir and os.path.exists(report_dir):
-        if os.path.isdir(report_dir):
-            return True
-    logging.error('Error HTML report directory. "%s"' % report_dir)
-    return False
 
 
 def check_exist_report_file(directory: str, filename: str) -> bool:
@@ -200,7 +191,7 @@ def get_statistics_logs(log_dir: str, log_filename: str) -> Optional[Tuple[List[
     try:
         file = func_openfile(log_path, 'rt', encoding='UTF-8')
     except Exception:
-        logging.exception('Log file open error %s' % log_path)
+        logging.exception(f'Log file open error: "{log_path}"')
         return None
     count_error_string = 0                  # count of error string in LOG file
     count_log_string = 0                    # count string in LOG file
@@ -270,7 +261,7 @@ def save_report_to_html_file(report_path: str,
     try:
         template_html_file = open(template_path)
     except Exception:
-        logging.exception('Bad template HTML report file. "%s"' % template_path)
+        logging.exception(f'Bad template HTML report file. "{template_path}"')
         return False
     template_report = ''.join(template_html_file.readlines())
     template_report = Template(template_report).safe_substitute(table_json=report_data)
@@ -278,13 +269,13 @@ def save_report_to_html_file(report_path: str,
     try:
         report_file = open(report_path, mode='w')
     except Exception:
-        logging.exception('Bad HTML report file. "%s"' % report_path)
+        logging.exception(f'Bad HTML report file. "{report_path}"')
         return False
     # записываем отчет в HTML файл
     try:
         report_file.write(template_report)
     except Exception:
-        logging.exception('Error write to HTML report file. "%s"' % report_path)
+        logging.exception(f'Error write to HTML report file. "{report_path}"')
         return False
     return True
 
@@ -296,32 +287,38 @@ def main(cfg: Dict):
     logging_ok = init_logging(cfg['logging_path'])
     if not logging_ok:
         return
-    result = get_last_logs_filename(cfg['log_dir'], cfg['pattern_logs_filename'])
-    if not result:
+    result_last_logs_filename = get_last_logs_filename(cfg['log_dir'], cfg['pattern_logs_filename'])
+    if not result_last_logs_filename:
         return
-    last_logs_filename, last_logs_filename_date = result
-    report_filename = get_report_filename(last_logs_filename_date)
+    last_logs_file = namedtuple('last_logs_file', ['filename', 'date'])
+    last_logs_file.filename, last_logs_file.date = result_last_logs_filename
+    logging.info(f'Last LOGs file found. "{last_logs_file.filename}"')
+
+    report_filename = get_report_filename(last_logs_file.date)
     if not report_filename:
+        logging.exception(f'Error getting report filename.')
         return
-    result_flag = check_exist_reports_directory(report_dir)
-    if not result_flag:
-        try:
-            os.makedirs(report_dir)
-        except Exception:
-            logging.exception('Error creating report directory')
-            return
-    result_flag = check_exist_report_file(report_dir, report_filename)
-    if result_flag:         # файл отчета уже существует, повторный анализ не производим, выход
-        logging.info('HTML report file already exists. Reanalysis canceled')
+    # создаем каталог с HTML отчетом
+    try:
+        os.makedirs(report_dir, exist_ok=True)
+    except Exception:
+        logging.exception(f'Error HTML report directory. "{report_dir}"')
         return
-    result_data = get_statistics_logs(cfg['log_dir'], last_logs_filename)
-    if not result_data:
+
+    result_exist_report_file = check_exist_report_file(report_dir, report_filename)
+    if result_exist_report_file:    # файл отчета уже существует, повторный анализ не производим, выход
+        logging.info(f'HTML report file already exists. Reanalysis canceled. "{os.path.join(report_dir, report_filename)}"')
         return
-    result_statistics, error_rate = result_data
-    if error_rate > float(cfg['parsing_error']):
+
+    result_statistics_logs = get_statistics_logs(cfg['log_dir'], last_logs_file.filename)
+    if not result_statistics_logs:
+        return
+    statistics_logs = namedtuple('statistics_logs', ['data', 'error_rate'])
+    statistics_logs.data, statistics_logs.error_rate = result_statistics_logs
+    if statistics_logs.error_rate > cfg['parsing_error']:
         logging.error('To many bad LOGS in file. Exit')
         return
-    report_data = get_limit_report(result_statistics, int(cfg['report_size']))
+    report_data = get_limit_report(statistics_logs.data, cfg['report_size'])
     if not report_data:
         return
 
@@ -331,8 +328,8 @@ def main(cfg: Dict):
     result_flag = save_report_to_html_file(report_path, report_template_path, report_data)
     if not result_flag:
         return
-    logging.info('Report successfully created: %s' % report_filename)
-    print('Report successfully created: %s' % report_filename)
+    logging.info(f'Report successfully created: "{report_filename}"')
+    print(f'Report successfully created: "{report_filename}"')
 
 
 if __name__ == "__main__":

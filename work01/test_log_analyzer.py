@@ -3,6 +3,7 @@
 
 import log_analyzer
 import unittest
+import datetime
 
 
 class TestParserLogString(unittest.TestCase):
@@ -28,33 +29,23 @@ class TestParserLogString(unittest.TestCase):
         self.assertEqual(log_analyzer.get_last_logs_filename(None, None), None)
         self.assertEqual(log_analyzer.get_last_logs_filename(self.test_dir,
                                                              self.cfg['pattern_logs_filename']),
-                         ('nginx-access-ui.log-20190505', '20190505'))
+                         ('nginx-access-ui.log-20190505',
+                          datetime.datetime.strptime('20190505', '%Y%m%d').date(),))
 
     def test_get_report_filename(self):
         list_string_result = list()
-        list_string_result.append(['20190505', 'report-2019.05.05.html'])
+
+        list_string_result.append([datetime.datetime.strptime('20190505', '%Y%m%d').date(),
+                                   'report-2019.05.05.html'])
         list_string_result.append(['', None])
-        list_string_result.append(['20200101', 'report-2020.01.01.html'])
+        list_string_result.append([datetime.datetime.strptime('20200101', '%Y%m%d').date(),
+                                    'report-2020.01.01.html'])
         for line in list_string_result:
             self.assertEqual(log_analyzer.get_report_filename(line[0]), line[1])
-
-    def test_check_exist_report_directory(self):
-        self.assertEqual(log_analyzer.check_exist_reports_directory(None), False)
-        self.assertEqual(log_analyzer.check_exist_reports_directory('./reports'), True)
 
     def test_check_exist_report_file(self):
         self.assertEqual(log_analyzer.check_exist_report_file(None, None), False)
         self.assertEqual(log_analyzer.check_exist_report_file('./', 'report.html'), True)
-
-    # def test_get_median_value_from_list(self):
-    #     list_string_result = list()
-    #     list_string_result.append([[], None])
-    #     list_string_result.append([[1.1], 1.1])
-    #     list_string_result.append([[1.1, 10], 5.55])
-    #     list_string_result.append([[17, 1.1, 8], 8])
-    #     list_string_result.append([[6, 5, 4, 3, 2, 1, 0], 3])
-    #     for line in list_string_result:
-    #         self.assertEqual(log_analyzer.get_median_value_from_list(line[0]), line[1])
 
     def test_parser_log_string(self):
         list_string_result = list()
