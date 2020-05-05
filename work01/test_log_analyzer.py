@@ -25,9 +25,9 @@ class TestParserLogString(unittest.TestCase):
     def test_init_logging(self):
         self.assertEqual(log_analyzer.init_logging('error.log'), True)
 
-    def test_get_last_logs_filename(self):
-        self.assertEqual(log_analyzer.get_last_logs_filename(None, None), None)
-        self.assertEqual(log_analyzer.get_last_logs_filename(self.test_dir,
+    def test_get_last_logs_file(self):
+        self.assertEqual(log_analyzer.get_last_logs_file(None, None), None)
+        self.assertEqual(log_analyzer.get_last_logs_file(self.test_dir,
                                                              self.cfg['pattern_logs_filename']),
                          ('nginx-access-ui.log-20190505',
                           datetime.datetime.strptime('20190505', '%Y%m%d').date(),))

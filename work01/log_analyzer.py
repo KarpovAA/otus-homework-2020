@@ -92,7 +92,7 @@ def init_logging(logging_output: str = None) -> bool:
     return True
 
 
-def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional[Tuple]:
+def get_last_logs_file(logs_dir: str, pattern_log_filename: str) -> Optional[Tuple[str, datetime.date]]:
     """ Возвращает имя последнего файла с логами NGINX.
     :param logs_dir: каталог с логами
     :param pattern_log_filename: шаблон имени файла с логами
@@ -101,6 +101,7 @@ def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional
     if not logs_dir or not os.path.isdir(logs_dir):
         logging.error(f'LOGs directory not found. LOG_DIR: "{logs_dir}"')
         return None
+    Last_logs_file = namedtuple('Last_logs_file', ['filename', 'date'])
     last_filename = None
     try:
         listdir = os.listdir(logs_dir)
@@ -122,7 +123,7 @@ def get_last_logs_filename(logs_dir: str, pattern_log_filename: str) -> Optional
     if not last_filename:
         logging.info('LOGS files not found in directory')
         return None
-    return last_filename, last_filename_date
+    return Last_logs_file(last_filename, last_filename_date)
 
 
 def get_report_filename(report_date: datetime.date) -> Optional[str]:
@@ -132,7 +133,7 @@ def get_report_filename(report_date: datetime.date) -> Optional[str]:
     """
     if not report_date:
         return None
-    filename = 'report-{}.html'.format(report_date.strftime('%Y.%m.%d'))
+    filename = f"report-{report_date.strftime('%Y.%m.%d')}.html"
     return filename
 
 
@@ -287,11 +288,9 @@ def main(cfg: Dict):
     logging_ok = init_logging(cfg['logging_path'])
     if not logging_ok:
         return
-    result_last_logs_filename = get_last_logs_filename(cfg['log_dir'], cfg['pattern_logs_filename'])
-    if not result_last_logs_filename:
+    last_logs_file = get_last_logs_file(cfg['log_dir'], cfg['pattern_logs_filename'])
+    if not last_logs_file:
         return
-    last_logs_file = namedtuple('last_logs_file', ['filename', 'date'])
-    last_logs_file.filename, last_logs_file.date = result_last_logs_filename
     logging.info(f'Last LOGs file found. "{last_logs_file.filename}"')
 
     report_filename = get_report_filename(last_logs_file.date)
