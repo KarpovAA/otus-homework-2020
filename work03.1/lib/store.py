@@ -1,10 +1,11 @@
 import redis
 import functools
 import time
-
+from functools import lru_cache
 
 MAX_RETRIES_RECONNECT = 3
 TIME_DELAY_TO_RECONNECT = 1     # ms
+MAX_CACHE_SIZE = 256
 
 
 def retry(exceptions, retries=MAX_RETRIES_RECONNECT, time_delay=TIME_DELAY_TO_RECONNECT):
@@ -79,6 +80,7 @@ class Storage:
     def set(self, key, value, time_expires=None):
         return self.storage.set(key, value, expires=time_expires)
 
+    @lru_cache(maxsize=MAX_CACHE_SIZE)
     @retry((TimeoutError, ConnectionError))
     def cache_get(self, key):
         return self.storage.get(key)
