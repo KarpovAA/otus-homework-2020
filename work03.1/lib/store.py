@@ -83,7 +83,11 @@ class Storage:
     @lru_cache(maxsize=MAX_CACHE_SIZE)
     @retry((TimeoutError, ConnectionError))
     def cache_get(self, key):
-        return self.storage.get(key)
+        try:
+            result_get = self.storage.get(key)
+        except Exception:
+            result_get = None
+        return result_get
 
     @retry((TimeoutError, ConnectionError))
     def cache_set(self, key, value, time_expires=60*60):
