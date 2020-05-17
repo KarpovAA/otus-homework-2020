@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import logging
+import asyncore
+import asynchat
+import socket
+import argparse
+import mimetypes
+import multiprocessing
+import urllib.parse
+from time import strftime, gmtime
+
+
+def get_path_from_filter_url(path):
+    path = path.split('?', 1)[0]
+    path = path.split('#', 1)[0]
+    path = urllib.parse.unquote(path)
+    if path.startswith("."):
+        path = "/" + path
+    while "../" in path:
+        p1 = path.find("/..")
+        p2 = path.rfind("/", 0, p1)
+        if p2 != -1:
+            path = path[:p2] + path[p1 + 3:]
+        else:
+            path = path.replace("/..", "", 1)
+    path = path.replace("/./", "/")
+    path = path.replace("/.", "")
+    parts = path.split('/')
+    path = os.path.join(DOCUMENT_ROOT, *parts)
+    return path
+
+
+class HTTPRequestHandler(asynchat.async_chat):
+    def __init__(self, sock):
+        asynchat.async_chat.__init__(self, sock)
+        self.set_terminator(b"\r\n\r\n")
+        self.socket = sock
+
+    def collect_incoming_data(self, data):
+        self._collect_incoming_data(data)
+
+    def found_terminator(self):
+        self.parse_request()
+
+    def parse_request(self):
+        if not self.parse_headers():
+            self.send_error(400)
+            self.handle_close()
+            return None
+        if self.method not in ['GET', 'HEAD']:
+            self.send_error(405)
+            self.handle_close()
+            return None
+        self.handle_request()
+
+    def parse_headers(self):
+        try:
+            headers_list = self._get_data().decode()
+            headers_list = headers_list.split("\r\n")
+            method, uri, protocol = headers_list[0].split(" ")
+            headers = {"method": method, "uri": uri, "protocol": protocol}
+            for header in headers_list[1:]:
+                header = header.split(':', 1)
+                if len(header) > 1:
+                    headers[header[0]] = header[1].strip()
+            self.method = method
+            self.request_uri = uri
+            self.http_protocol = protocol
+            self.headers = headers
+            return True
+        except Exception as e:
+            return False
+
+    def send_error(self, code):
+        try:
+            message = self.responses[code]
+        except KeyError:
+            message = None
+        self.send_response(code, message)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def send_header(self, keyword, value):
+        self.push("{}: {}\r\n".format(keyword, value).encode())
+
+    def send_head(self):
+        path = get_path_from_filter_url(self.request_uri)
+        log.info(f'request_uri: "{path}"')
+        if os.path.isdir(path):
+            path = os.path.join(path, "index.html")
+            if not os.path.exists(path):
+                self.send_response(404)
+                self.handle_close()
+                return None
+        try:
+            f = open(path, mode='rb')
+        except IOError:
+            self.send_response(404)
+            self.handle_close()
+            return None
+        _, ext = os.path.splitext(path)
+        ctype = mimetypes.types_map[ext.lower()]
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", os.path.getsize(path))
+        self.end_headers()
+        return f
+
+    def end_headers(self):
+        self.push("\r\n".encode())
+
+    def handle_request(self):
+        method_name = 'do_' + self.method
+        if not hasattr(self, method_name):
+            self.send_error(405)
+            self.handle_close()
+            return
+        handler = getattr(self, method_name)
+        handler()
+
+    def send_response(self, code, message=None):
+        if message is None:
+            if code in self.responses:
+                message = self.responses[code]
+            else:
+                message = ''
+        data_push = f"{self.http_protocol} {code} {message}\r\n"
+        log.info(f'Response code: "{code}"')
+        self.push(data_push.encode())
+        self.send_header("Server", "simple-http-server")
+        self.send_header("Date", strftime("%a, %d %b %Y %H:%M:%S GMT", gmtime()))
+
+    def do_GET(self):
+        f = self.send_head()
+        if f:
+            while True:
+                data_small_block = f.read(4096)
+                if data_small_block == b'':
+                    break
+                self.push(data_small_block)
+            f.close()
+            self.handle_close()
+
+    def do_HEAD(self):
+        f = self.send_head()
+        if f:
+            f.close()
+            self.handle_close()
+
+    responses = {
+        200: 'OK',
+        400: 'Bad Request',
+        403: 'Forbidden',
+        404: 'Not Found',
+        405: 'Method Not Allowed',
+    }
+
+
+class HTTPServer(asyncore.dispatcher_with_send):
+    def __init__(self, host="127.0.0.1", port=8000):
+        asyncore.dispatcher.__init__(self)
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        try:
+            self.bind((host, port))
+            self.listen(5)
+            log.info(f"Listening on address {host}:{port}. PID: {os.getpid()}")
+        except Exception as e:
+            log.exception("Socket error")
+
+    def handle_accepted(self, sock, addr):
+        log.info(f"Incoming connection from {addr}. PID: {os.getpid()}")
+        handler = HTTPRequestHandler(sock)
+
+    def serve_forever(self):
+        try:
+            asyncore.loop(timeout=1, use_poll=True)
+        except KeyboardInterrupt:
+            log.debug("Worker shutdown")
+        finally:
+            self.close()
+
+
+def parse_cmd_args():
+    parser = argparse.ArgumentParser("Simple HTTP server")
+    parser.add_argument("--host", dest="host", default="127.0.0.1")
+    parser.add_argument("--port", dest="port", type=int, default=8000)
+    parser.add_argument("--logfile", dest="logfile", default=None)
+    parser.add_argument("-w", dest="n_workers", type=int, default=2)
+    parser.add_argument("-r", dest="document_root", default=".")
+    return parser.parse_args()
+
+
+def run():
+    server = HTTPServer(host=args.host, port=args.port)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    args = parse_cmd_args()
+    logging.basicConfig(filename=None, level=logging.INFO,
+                        format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
+    log = logging.getLogger(__name__)
+    log.info(f"Starting server at {args.host} {args.port}")
+
+    DOCUMENT_ROOT = args.document_root
+
+    for _ in range(args.n_workers):
+        p = multiprocessing.Process(target=run)
+        p.start()
