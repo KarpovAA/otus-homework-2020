@@ -1,14 +1,29 @@
-Simple HTTP server
-The server uses multiple threads to handle requests. 
+###**Simple HTTP server**
+The server uses multiple threads to handle requests.
 
-Requirements: Python 3.6+
+**Command line arguments:**
 
+- **--host** - host (default: 127.0.0.1)
+- **--port** - port (default: 8000)
+- **--logfile** - log filename (default -> stdout)
+- **-w** - count workers (default: 2)
+- **-r** - DOCUMENT_ROOT (default: current directory)
 
-Test:
-./httpd.py -w100
-ab -n 50000 -c 100 -r http://127.0.0.1:8000/
+**Requirements**
+- Python 3.6+
 
-Test result:
+**Run server**
+- `./httpd.py -w100`
+- `python3 -m httpd -w10`
+
+**Tests**
+- `python3 -m tests.httptest`
+
+**Run ApacheBench test:**
+- `ab -n 50000 -c 100 -r http://127.0.0.1:8000/`
+
+**ApacheBench test result:**
+```
 This is ApacheBench, Version 2.3 <$Revision: 1843412 $>
 Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
 Licensed to The Apache Software Foundation, http://www.apache.org/
@@ -27,7 +42,7 @@ Completed 50000 requests
 Finished 50000 requests
 
 
-Server Software:        simple-http-server
+Server Software:        
 Server Hostname:        127.0.0.1
 Server Port:            8000
 
@@ -62,13 +77,15 @@ Percentage of the requests served within a certain time (ms)
   98%      2
   99%      2
  100%     10 (longest request)
+```
 
+**Run ApacheBench test (server in docker):**
 
-Test in Docker:
-./httpd.py --host 172.17.0.2 -w100
-ab -n 50000 -c 100 -r http://172.17.0.2:8000/
+`ab -n 50000 -c 100 -r http://172.17.0.2:8000/`
 
-Result test:
+**ApacheBench test result (server in docker):**
+
+```
 This is ApacheBench, Version 2.3 <$Revision: 1843412 $>
 Copyright 1996 Adam Twiss, Zeus Technology Ltd, http://www.zeustech.net/
 Licensed to The Apache Software Foundation, http://www.apache.org/
@@ -123,3 +140,4 @@ Percentage of the requests served within a certain time (ms)
   99%    369
  100%   3041 (longest request)
 
+```
