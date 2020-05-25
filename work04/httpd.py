@@ -17,17 +17,7 @@ def get_path_from_filter_url(path):
     path = path.split('?', 1)[0]
     path = path.split('#', 1)[0]
     path = urllib.parse.unquote(path)
-    if path.startswith("."):
-        path = "/" + path
-    while "../" in path:
-        p1 = path.find("/..")
-        p2 = path.rfind("/", 0, p1)
-        if p2 != -1:
-            path = path[:p2] + path[p1 + 3:]
-        else:
-            path = path.replace("/..", "", 1)
-    path = path.replace("/./", "/")
-    path = path.replace("/.", "")
+    path = os.path.normpath(path)
     parts = path.split('/')
     path = os.path.join(DOCUMENT_ROOT, *parts)
     return path
@@ -38,6 +28,7 @@ class HTTPRequestHandler(asynchat.async_chat):
         asynchat.async_chat.__init__(self, sock)
         self.set_terminator(b"\r\n\r\n")
         self.socket = sock
+        self.f = None
 
     def collect_incoming_data(self, data):
         self._collect_incoming_data(data)
@@ -171,6 +162,8 @@ class HTTPServer(asyncore.dispatcher_with_send):
             log.info(f"Listening on address {host}:{port}. PID: {os.getpid()}")
         except Exception as e:
             log.exception("Socket error")
+            self.close()
+            raise e
 
     def handle_accepted(self, sock, addr):
         log.info(f"Incoming connection from {addr}. PID: {os.getpid()}")
@@ -190,7 +183,7 @@ def parse_cmd_args():
     parser.add_argument("--host", dest="host", default="127.0.0.1")
     parser.add_argument("--port", dest="port", type=int, default=8000)
     parser.add_argument("--logfile", dest="logfile", default=None)
-    parser.add_argument("-w", dest="n_workers", type=int, default=2)
+    parser.add_argument("-w", dest="n_workers", type=int, default=1)
     parser.add_argument("-r", dest="document_root", default=".")
     return parser.parse_args()
 
