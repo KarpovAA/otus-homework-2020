@@ -12,7 +12,6 @@ import multiprocessing
 import urllib.parse
 from time import strftime, gmtime
 from collections import namedtuple
-from typing import Optional, Tuple
 
 
 def get_path_from_filter_url(path):
