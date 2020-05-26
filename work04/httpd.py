@@ -11,6 +11,8 @@ import mimetypes
 import multiprocessing
 import urllib.parse
 from time import strftime, gmtime
+from collections import namedtuple
+from typing import Optional, Tuple
 
 
 def get_path_from_filter_url(path):
@@ -78,28 +80,36 @@ class HTTPRequestHandler(asynchat.async_chat):
     def send_header(self, keyword, value):
         self.push("{}: {}\r\n".format(keyword, value).encode())
 
-    def send_head(self):
-        path = get_path_from_filter_url(self.request_uri)
-        log.info(f'request_uri: "{path}"')
-        if os.path.isdir(path):
-            path = os.path.join(path, "index.html")
-            if not os.path.exists(path):
-                self.send_response(404)
-                self.handle_close()
+    def get_file_to_send(self):
+        file = namedtuple('f', 'path')
+        file.path = get_path_from_filter_url(self.request_uri)
+        log.info(f'request_uri: "{file.path}"')
+        if os.path.isdir(file.path):
+            file.path = os.path.join(file.path, "index.html")
+            if not os.path.exists(file.path):
                 return None
         try:
-            f = open(path, mode='rb')
+            file.f = open(file.path, mode='rb')
         except IOError:
+            return None
+        return file
+
+    def send_head(self, f):
+        """ Send Response Header
+        :param f: Tuple[file, path]
+        :return:
+        """
+        if not f:
             self.send_response(404)
             self.handle_close()
-            return None
-        _, ext = os.path.splitext(path)
+
+        _, ext = os.path.splitext(f.path)
         ctype = mimetypes.types_map[ext.lower()]
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", os.path.getsize(path))
+        self.send_header("Content-Length", os.path.getsize(f.path))
         self.end_headers()
-        return f
+        return
 
     def end_headers(self):
         self.push("\r\n".encode())
@@ -126,20 +136,22 @@ class HTTPRequestHandler(asynchat.async_chat):
         self.send_header("Date", strftime("%a, %d %b %Y %H:%M:%S GMT", gmtime()))
 
     def do_GET(self):
-        f = self.send_head()
-        if f:
+        file = self.get_file_to_send()
+        self.send_head(file)
+        if file:
             while True:
-                data_small_block = f.read(4096)
+                data_small_block = file.f.read(4096)
                 if data_small_block == b'':
                     break
                 self.push(data_small_block)
-            f.close()
+            file.f.close()
             self.handle_close()
 
     def do_HEAD(self):
-        f = self.send_head()
-        if f:
-            f.close()
+        file = self.get_file_to_send()
+        self.send_head(file)
+        if file:
+            file.f.close()
             self.handle_close()
 
     responses = {
@@ -202,6 +214,10 @@ if __name__ == "__main__":
 
     DOCUMENT_ROOT = args.document_root
 
-    for _ in range(args.n_workers):
-        p = multiprocessing.Process(target=run)
-        p.start()
+
+    server = HTTPServer(host=args.host, port=args.port)
+    server.serve_forever()
+
+    # for _ in range(args.n_workers):
+    #     p = multiprocessing.Process(target=run)
+    #     p.start()
