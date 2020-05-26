@@ -214,10 +214,6 @@ if __name__ == "__main__":
 
     DOCUMENT_ROOT = args.document_root
 
-
-    server = HTTPServer(host=args.host, port=args.port)
-    server.serve_forever()
-
-    # for _ in range(args.n_workers):
-    #     p = multiprocessing.Process(target=run)
-    #     p.start()
+    for _ in range(args.n_workers):
+        p = multiprocessing.Process(target=run)
+        p.start()
