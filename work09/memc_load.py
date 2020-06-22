@@ -21,9 +21,11 @@ import memcache
 
 NORMAL_ERR_RATE = 0.01
 MEMCACHE_MAX_RETRIES = 3
-MEMCACHE_TIMEOUT = 1
+MEMCACHE_TIMEOUT = 3
+MEMCACHE_NUM_KEYS_IN_SET_MULTI = 100
 THREADS_IN_WORKER = 4
 NUM_WORKERS = mp.cpu_count()
+QUEUE_TIMEOUT = 0.0001
 AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "lat", "lon", "apps"])
 
 
@@ -33,35 +35,37 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_pools, memc_addr, appsinstalled, dry_run=False):
-    ua = appsinstalled_pb2.UserApps()
-    ua.lat = appsinstalled.lat
-    ua.lon = appsinstalled.lon
-    key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-    ua.apps.extend(appsinstalled.apps)
-    packed = ua.SerializeToString()
+def insert_appsinstalled(memc_client, memc_addr, list_appsinstalled, dry_run=False):
+    data = {}
+    for appsinstalled in list_appsinstalled:
+        ua = appsinstalled_pb2.UserApps()
+        ua.lat = appsinstalled.lat
+        ua.lon = appsinstalled.lon
+        key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+        ua.apps.extend(appsinstalled.apps)
+        packed = ua.SerializeToString()
+        if dry_run:
+            data[key] = ua
+        else:
+            data[key] = packed
 
     try:
         if dry_run:
-            logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
+            for key, ua in data.items():
+                logging.debug("%s - %s -> %s" % (memc_addr, key, str(ua).replace("\n", " ")))
         else:
             memc_flag = False
-            try:
-                memc = memc_pools.get(timeout=0.1)
-            except queue.Empty:
-                memc = memcache.Client([memc_addr])
-
             for n in range(MEMCACHE_MAX_RETRIES):
-                memc_flag = memc.set(key, packed)
-                if memc_flag:
+                memc_flag = memc_client.set_multi(data)
+                if not memc_flag:
+                    # set_multi return empty list [] - it's OK
                     break
                 sleep_value = MEMCACHE_TIMEOUT * n
                 time.sleep(sleep_value)
 
             if memc_flag:
-                memc_pools.put(memc)
-                return True
-            else:
+                # set_multi return not null list - it's ERROR.
+                # List of keys which failed to be stored
                 logging.error(f"Memcached server connection error {memc_addr}")
                 return False
     except Exception as e:
@@ -89,26 +93,69 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def handler_job(job_queue, result_queue):
+def handler_job(job_queue, result_queue, finish_readfile,
+                memc_pools, device_memc, dry_run=False):
     processed = errors = 0
     logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. PROCESSING")
+    buffer = collections.defaultdict(list)
     while True:
+        flag_push_buffer = False
         try:
-            job = job_queue.get(timeout=0.1)
+            job = job_queue.get(timeout=QUEUE_TIMEOUT)
         except queue.Empty:
-            logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. FINISHED")
-            result_queue.put((processed, errors))
-            return
+            if not finish_readfile.empty():
+                # waiting finish reading file
+                continue
+            flag_push_buffer = False
+            for key in buffer.keys():
+                if len(buffer[key]) > 0:
+                    # buffer not empty
+                    flag_push_buffer = True
+                    buffer_key = key
+                    break
+            if not flag_push_buffer:
+                logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. FINISHED")
+                result_queue.put((processed, errors))
+                return
 
-        memc_pool, memc_addr, appsinstalled, dry_run = job
-        ok = insert_appsinstalled(memc_pool, memc_addr, appsinstalled, dry_run)
+        if not flag_push_buffer:
+            line = job
+
+            appsinstalled = parse_appsinstalled(line)
+            if not appsinstalled:
+                errors += 1
+                continue
+            memc_addr = device_memc.get(appsinstalled.dev_type)
+            if not memc_addr:
+                errors += 1
+                logging.error(f"Unknown device type: {appsinstalled.dev_type}")
+                continue
+
+            buffer[memc_addr].append(appsinstalled)
+
+            if len(buffer[memc_addr]) <= MEMCACHE_NUM_KEYS_IN_SET_MULTI:
+                continue
+
+            try:
+                memc_client = memc_pools[memc_addr].get(timeout=QUEUE_TIMEOUT)
+            except queue.Empty:
+                memc_client = memcache.Client([memc_addr])
+                memc_pools[memc_addr].put(memc_client)
+        else:
+            memc_addr = buffer_key
+            memc_client = memcache.Client([memc_addr])
+
+        ok = insert_appsinstalled(memc_client, memc_addr, buffer[memc_addr], dry_run)
+
         if ok:
             processed += 1
         else:
             errors += 1
 
+        buffer[memc_addr].clear()
 
-def main(fn, options):
+
+def handler_logfile(fn, options):
     device_memc = {
         "idfa": options.idfa,
         "gaid": options.gaid,
@@ -120,10 +167,14 @@ def main(fn, options):
     memc_pools = collections.defaultdict(queue.Queue)
     job_queue = queue.Queue(maxsize=0)
     result_queue = queue.Queue(maxsize=0)
+    finish_readfile = queue.Queue(maxsize=0)    # not empty queue - reading file, empty - finish
+    finish_readfile.put("1")  # queue -> start reading file
 
     thread_workers = []
     for i in range(THREADS_IN_WORKER):
-        thread = threading.Thread(target=handler_job, args=(job_queue, result_queue))
+        thread = threading.Thread(target=handler_job,
+                                  args=(job_queue, result_queue, finish_readfile,
+                                        memc_pools, device_memc, options.dry))
         thread.daemon = True
         thread_workers.append(thread)
 
@@ -132,33 +183,21 @@ def main(fn, options):
 
     processed = errors = 0
 
-    if os.path.splitext(fn)[1][1:].strip().lower() in ['tsv']:
-        fd = open(fn)
-    else:
-        try:
-            fd = gzip.open(fn, 'rt')
-        except Exception as e:
-            raise e
+    fd = gzip.open(fn, 'rt')
 
     with fd:
         for line in fd:
             line = line.strip()
             if not line:
                 continue
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error(f"Unknown device type: {appsinstalled.dev_type}")
-                continue
 
-            job_queue.put((memc_pools[memc_addr], memc_addr, appsinstalled, options.dry))
+            job_queue.put(line)
 
             if not all(thread.is_alive() for thread in thread_workers):
                 break
+
+    finish_readfile.get()       # queue -> finish reading file
+    logging.info(f"[{mp.current_process().name}] Finished reading file {fn}")
 
     for thread in thread_workers:
         if thread.is_alive():
@@ -172,11 +211,19 @@ def main(fn, options):
     if processed:
         err_rate = float(errors) / processed
         if err_rate < NORMAL_ERR_RATE:
-            logging.info(f"Acceptable error rate ({err_rate}). Successfully load")
+            logging.info(f"[{mp.current_process().name}] Acceptable error rate ({err_rate}). Successfully load")
         else:
-            logging.error(f"High error rate ({err_rate} > {NORMAL_ERR_RATE}). Failed load")
+            logging.error(f"[{mp.current_process().name}] High error rate ({err_rate} > {NORMAL_ERR_RATE}). Failed load")
 
     return fn
+
+
+def main(options):
+    pool = mp.Pool(processes=NUM_WORKERS)
+    file_names = sorted(fn for fn in glob.iglob(options.pattern))
+    handler = partial(handler_logfile, options=options)
+    for fn in pool.imap(handler, file_names):
+        dot_rename(fn)
 
 
 def prototest():
@@ -214,16 +261,8 @@ if __name__ == '__main__':
 
     logging.info(f"Memc loader started with options: {opts}")
     try:
-        file_names = sorted(fn for fn in glob.iglob(opts.pattern))
-        if file_names:
-            print('files:', file_names)
-            pool = mp.Pool(processes=NUM_WORKERS)
-            handler = partial(main, options=opts)
-            for fn in pool.map(handler, file_names):
-                dot_rename(fn)
-            pool.close()
-        else:
-            logging.info(f"Logs files not found in dir: {opts.pattern}")
+        main(opts)
+
     except Exception as e:
         logging.exception(f"Unexpected error: {e}")
         sys.exit(1)
