@@ -22,7 +22,7 @@ import memcache
 NORMAL_ERR_RATE = 0.01
 MEMCACHE_MAX_RETRIES = 3
 MEMCACHE_TIMEOUT = 3
-MEMCACHE_NUM_KEYS_IN_SET_MULTI = 100
+MEMCACHE_NUM_KEYS_IN_SET_MULTI = 100    # chunk size
 THREADS_IN_WORKER = 4
 NUM_WORKERS = mp.cpu_count()
 QUEUE_TIMEOUT = 0.0001
@@ -93,66 +93,33 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def handler_job(job_queue, result_queue, finish_readfile,
-                memc_pools, device_memc, dry_run=False):
+def handler_job(job_queue, result_queue, flag_finished_readfile,
+                memc_pools, dry_run=False):
     processed = errors = 0
     logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. PROCESSING")
-    buffer = collections.defaultdict(list)
     while True:
-        flag_push_buffer = False
         try:
             job = job_queue.get(timeout=QUEUE_TIMEOUT)
         except queue.Empty:
-            if not finish_readfile.empty():
-                # waiting finish reading file
+            if not flag_finished_readfile.isSet():  # waiting finish reading file
                 continue
-            flag_push_buffer = False
-            for key in buffer.keys():
-                if len(buffer[key]) > 0:
-                    # buffer not empty
-                    flag_push_buffer = True
-                    buffer_key = key
-                    break
-            if not flag_push_buffer:
-                logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. FINISHED")
-                result_queue.put((processed, errors))
-                return
+            logging.info(f"Worker: [{mp.current_process().name}]. Thread: {threading.current_thread().name}. FINISHED")
+            result_queue.put((processed, errors))
+            return
 
-        if not flag_push_buffer:
-            line = job
+        memc_addr, chunk = job
 
-            appsinstalled = parse_appsinstalled(line)
-            if not appsinstalled:
-                errors += 1
-                continue
-            memc_addr = device_memc.get(appsinstalled.dev_type)
-            if not memc_addr:
-                errors += 1
-                logging.error(f"Unknown device type: {appsinstalled.dev_type}")
-                continue
-
-            buffer[memc_addr].append(appsinstalled)
-
-            if len(buffer[memc_addr]) <= MEMCACHE_NUM_KEYS_IN_SET_MULTI:
-                continue
-
-            try:
-                memc_client = memc_pools[memc_addr].get(timeout=QUEUE_TIMEOUT)
-            except queue.Empty:
-                memc_client = memcache.Client([memc_addr])
-                memc_pools[memc_addr].put(memc_client)
-        else:
-            memc_addr = buffer_key
+        try:
+            memc_client = memc_pools[memc_addr].get(timeout=QUEUE_TIMEOUT)
+        except queue.Empty:
             memc_client = memcache.Client([memc_addr])
+            memc_pools[memc_addr].put(memc_client)
 
-        ok = insert_appsinstalled(memc_client, memc_addr, buffer[memc_addr], dry_run)
-
+        ok = insert_appsinstalled(memc_client, memc_addr, chunk, dry_run)
         if ok:
             processed += 1
         else:
             errors += 1
-
-        buffer[memc_addr].clear()
 
 
 def handler_logfile(fn, options):
@@ -167,14 +134,13 @@ def handler_logfile(fn, options):
     memc_pools = collections.defaultdict(queue.Queue)
     job_queue = queue.Queue(maxsize=0)
     result_queue = queue.Queue(maxsize=0)
-    finish_readfile = queue.Queue(maxsize=0)    # not empty queue - reading file, empty - finish
-    finish_readfile.put("1")  # queue -> start reading file
+    flag_finished_readfile = threading.Event()      # flag finished read LOG file
 
     thread_workers = []
     for i in range(THREADS_IN_WORKER):
         thread = threading.Thread(target=handler_job,
-                                  args=(job_queue, result_queue, finish_readfile,
-                                        memc_pools, device_memc, options.dry))
+                                  args=(job_queue, result_queue, flag_finished_readfile,
+                                        memc_pools, options.dry))
         thread.daemon = True
         thread_workers.append(thread)
 
@@ -185,18 +151,39 @@ def handler_logfile(fn, options):
 
     fd = gzip.open(fn, 'rt')
 
+    chunk = collections.defaultdict(list)
     with fd:
         for line in fd:
             line = line.strip()
             if not line:
                 continue
 
-            job_queue.put(line)
+            appsinstalled = parse_appsinstalled(line)
+            if not appsinstalled:
+                errors += 1
+                continue
+            memc_addr = device_memc.get(appsinstalled.dev_type)
+            if not memc_addr:
+                errors += 1
+                logging.error(f"Unknown device type: {appsinstalled.dev_type}")
+                continue
+
+            chunk[memc_addr].append(appsinstalled)
+
+            if len(chunk[memc_addr]) < MEMCACHE_NUM_KEYS_IN_SET_MULTI:
+                continue
+            job_queue.put((memc_addr, chunk[memc_addr][:]))
+            chunk[memc_addr].clear()
 
             if not all(thread.is_alive() for thread in thread_workers):
                 break
 
-    finish_readfile.get()       # queue -> finish reading file
+    for key in chunk.keys():
+        if len(chunk[key]) > 0:
+            job_queue.put((key, chunk[key][:]))
+            chunk[key].clear()
+
+    flag_finished_readfile.set()    # finish reading file
     logging.info(f"[{mp.current_process().name}] Finished reading file {fn}")
 
     for thread in thread_workers:
