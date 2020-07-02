@@ -35,20 +35,7 @@ def dot_rename(path):
     os.rename(path, os.path.join(head, "." + fn))
 
 
-def insert_appsinstalled(memc_client, memc_addr, list_appsinstalled, dry_run=False):
-    data = {}
-    for appsinstalled in list_appsinstalled:
-        ua = appsinstalled_pb2.UserApps()
-        ua.lat = appsinstalled.lat
-        ua.lon = appsinstalled.lon
-        key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
-        ua.apps.extend(appsinstalled.apps)
-        packed = ua.SerializeToString()
-        if dry_run:
-            data[key] = ua
-        else:
-            data[key] = packed
-
+def insert_appsinstalled(memc_client, memc_addr, data, dry_run=False):
     try:
         if dry_run:
             for key, ua in data.items():
@@ -151,13 +138,12 @@ def handler_logfile(fn, options):
 
     fd = gzip.open(fn, 'rt')
 
-    chunk = collections.defaultdict(list)
+    chunk = collections.defaultdict(collections.defaultdict)
     with fd:
         for line in fd:
             line = line.strip()
             if not line:
                 continue
-
             appsinstalled = parse_appsinstalled(line)
             if not appsinstalled:
                 errors += 1
@@ -168,11 +154,21 @@ def handler_logfile(fn, options):
                 logging.error(f"Unknown device type: {appsinstalled.dev_type}")
                 continue
 
-            chunk[memc_addr].append(appsinstalled)
+            ua = appsinstalled_pb2.UserApps()
+            ua.lat = appsinstalled.lat
+            ua.lon = appsinstalled.lon
+            key = "%s:%s" % (appsinstalled.dev_type, appsinstalled.dev_id)
+            ua.apps.extend(appsinstalled.apps)
+            packed = ua.SerializeToString()
+
+            if options.dry:
+                chunk[memc_addr][key] = ua
+            else:
+                chunk[memc_addr][key] = packed
 
             if len(chunk[memc_addr]) < MEMCACHE_NUM_KEYS_IN_SET_MULTI:
                 continue
-            job_queue.put((memc_addr, chunk[memc_addr][:]))
+            job_queue.put((memc_addr, dict(chunk[memc_addr])))
             chunk[memc_addr].clear()
 
             if not all(thread.is_alive() for thread in thread_workers):
@@ -180,7 +176,7 @@ def handler_logfile(fn, options):
 
     for key in chunk.keys():
         if len(chunk[key]) > 0:
-            job_queue.put((key, chunk[key][:]))
+            job_queue.put((key, dict(chunk[key])))
             chunk[key].clear()
 
     flag_finished_readfile.set()    # finish reading file
@@ -211,7 +207,6 @@ def main(options):
     handler = partial(handler_logfile, options=options)
     for fn in pool.imap(handler, file_names):
         dot_rename(fn)
-
 
 def prototest():
     sample = "idfa\t1rfw452y52g2gq4g\t55.55\t42.42\t1423,43,567,3,7,23\ngaid\t7rfw452y52g2gq4g\t55.55\t42.42\t7423,424"
@@ -247,6 +242,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     logging.info(f"Memc loader started with options: {opts}")
+
     try:
         main(opts)
 
