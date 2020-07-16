@@ -24,99 +24,107 @@ DOWNLOAD_CHUNK_SIZE_BYTES = 1024
 DOWNLOAD_MAX_SIZE_BYTES = 3000000
 
 
-async def download_url_to_dir(session: aiohttp.ClientSession, url: str, output_directory: Path,
-                              timeout: int = REQUEST_TIMEOUT) -> None:
-    """ Download data from 'url` to `output_dir` directory.
+async def save_to_file(content_data: bytes, file_path: Path) -> None:
+    """ Save data [content_data] to file [path_file].
     """
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-
-    try:
-        async with session.get(url, timeout=client_timeout) as response:
-            logging.info(f"Got response {response.status} for: {url}")
-            ext: str = response.content_type.split("/")[-1]
-            filename: str = re.sub("\W", "_", url)
-            output_path = output_directory / f"{filename}.{ext}"
-
-            content: bytes = b""
-            while True:
-                chunk = await response.content.read(DOWNLOAD_CHUNK_SIZE_BYTES)
-                if not chunk:
-                    break
-                content += chunk
-                if len(content) > DOWNLOAD_MAX_SIZE_BYTES:
-                    logging.error(f"URL: {url} DOWNLOAD_MAX_SIZE_BYTES limit exceeded")
-                    break
-
-            async with aiofiles.open(output_path, "wb") as fd:
-                await fd.write(content)
-
-            logging.info(f"URL: {url} has been successfully downloaded to {output_path}")
-
-    except Exception as e:
-        logging.exception(f"URL: {url} download error to {output_directory} {e}")
+    async with aiofiles.open(file_path, "wb") as fd:
+        await fd.write(content_data)
 
 
-async def download_news(session: aiohttp.ClientSession, news_id: str, news_url: str, output_dir: Path) -> None:
-    """ Downloads: news from url=news_url to `output_dir` directory and
-                   comments for current news from id=news_id to `output_dir/comments` directory.
-    """
-    if output_dir.is_dir():
-        return
-    output_dir.mkdir()
-    await download_url_to_dir(session, unescape(news_url), output_dir)
-
-    comment_url = f"{BASE_URL}item?id={news_id}"
-    urls_from_comment = await parse_urls(session, comment_url, RE_COMMENT_LINK)
-    if urls_from_comment:
-        output_comments_dir = output_dir.joinpath('comments')
-        output_comments_dir.mkdir()
-        for url in urls_from_comment:
-            await download_url_to_dir(session, unescape(url), output_comments_dir)
-
-
-async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int = REQUEST_TIMEOUT) -> Tuple[int, str]:
-    """ Fetch HTML page from URL.
+async def fetch_url(session: aiohttp.ClientSession, url: str, timeout: int = REQUEST_TIMEOUT) -> Tuple[bytes, str]:
+    """ Return received from url content data [byte type] and content type.
     """
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async with session.get(url, timeout=client_timeout) as response:
         logging.info(f"Response status: {response.status}, for: {url}")
-        return response.status, await response.text()
+        content_type: str = response.content_type.split("/")[-1]
+        content_data: bytes = b""
+        while True:
+            chunk = await response.content.read(DOWNLOAD_CHUNK_SIZE_BYTES)
+            if not chunk:
+                break
+            content_data += chunk
+            if len(content_data) > DOWNLOAD_MAX_SIZE_BYTES:
+                logging.error(f"URL: {url} DOWNLOAD_MAX_SIZE_BYTES limit exceeded")
+                break
+        return content_data, content_type
 
 
-async def parse_urls(session: aiohttp.ClientSession, url: str, pattern: str) -> List[str]:
-    """ Search pattern in html text from URL.
+async def parse_urls(session: aiohttp.ClientSession, url: str, pattern: str, timeout: int = REQUEST_TIMEOUT) -> List[str]:
+    """ Returns list of found patterns in html text from URL.
     """
     urls: List[str] = []
     try:
-        status, html = await fetch_url(session, url)
+        content, _ = await fetch_url(session, url, timeout=timeout)
     except Exception as e:
         logging.exception(f"Could not fetch {url} {e}")
         return urls
 
-    urls = re.findall(pattern, html)
-
+    if content:
+        urls = re.findall(pattern, content.decode('utf-8'))
     logging.info(f"Found {len(urls)} urls")
     return urls
 
 
-async def main(output_dir: Path, refresh_time: int) -> None:
-    """ Async download news from BASE_URL to output_dir.
+async def download_url_to_dir(session: aiohttp.ClientSession, url: str, output_dir: Path,
+                              timeout: int = REQUEST_TIMEOUT) -> None:
+    """ Download data from 'url` to `output_dir` directory.
     """
-    while True:
-        logging.info("Starting download")
-        num_downloaded: int = len(list(output_dir.iterdir()))
-        logging.info(f"Total number of news downloaded: {num_downloaded}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        content_data, content_type = await fetch_url(session, url, timeout=timeout)
+        filename: str = re.sub("\W", "_", url)
+        output_path = output_dir / f"{filename}.{content_type}"
+        await save_to_file(content_data, output_path)
+        logging.info(f"URL: {url} has been successfully downloaded to {output_path}")
+    except Exception as e:
+        logging.exception(f"URL: {url} download error to {output_dir} {e}")
 
-        connector = aiohttp.TCPConnector(limit_per_host=LIMIT_PER_HOST_CONNECTIONS, force_close=True)
 
-        async with aiohttp.ClientSession(connector=connector) as session:
-            top_news: List[any] = await parse_urls(session, BASE_URL, RE_NEWS_LINK)
-            tasks = (download_news(session, news_id, url, output_dir.joinpath(news_id))
-                     for news_id, url in top_news[:30])
-            await asyncio.gather(*tasks)
+async def main(output_dir: Path, session: aiohttp.ClientSession, downloaded_news: List[str]) -> None:
+    """ Download news from BASE_URL and link from comments to output_dir.
+    """
+    tasks_news: List[any] = []
+    tasks_comments: List[any] = []
+    top_news: List[any] = await parse_urls(session, BASE_URL, RE_NEWS_LINK)
+    for news_id, url in top_news[:30]:
+        if news_id not in downloaded_news:
+            tasks_news.append(asyncio.create_task(download_url_to_dir(session, unescape(url),
+                                                                      output_dir.joinpath(news_id))))
 
-        logging.info(f"Waiting for refresh time in {refresh_time} seconds")
-        await asyncio.sleep(refresh_time)
+    for news_id, _ in top_news[:30]:
+        if news_id not in downloaded_news:
+            downloaded_news.append(news_id)
+            comment_url = f"{BASE_URL}item?id={news_id}"
+            urls_from_comment = await parse_urls(session, comment_url, RE_COMMENT_LINK)
+            if urls_from_comment:
+                for url_comment in urls_from_comment:
+                    tasks_comments.append(asyncio.create_task(
+                        download_url_to_dir(session, unescape(url_comment), output_dir.joinpath(news_id, 'comments'))))
+
+    logging.info(f"Create {len(tasks_news)+len(tasks_comments)} tasks for download")
+
+
+async def repeat_main(output_dir: Path, refresh_time: int) -> None:
+    """ Async run main every refresh_time seconds.
+    """
+    logging.info("Starting download")
+    downloaded_news: List[str] = []
+    for path_dir in output_dir.iterdir():
+        downloaded_news.append(path_dir.parts[-1])
+    logging.info(f"Total number of news downloaded: {len(downloaded_news)}")
+
+    connector = aiohttp.TCPConnector(limit_per_host=LIMIT_PER_HOST_CONNECTIONS, force_close=True)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        while True:
+            try:
+                await asyncio.wait_for(main(output_dir, session, downloaded_news), timeout=refresh_time)
+
+            except asyncio.TimeoutError:
+                logging.info(f'Error timeout {refresh_time}')
+
+            logging.info(f"Waiting for refresh time in {refresh_time} seconds")
+            await asyncio.sleep(refresh_time)
 
 
 if __name__ == '__main__':
@@ -136,6 +144,6 @@ if __name__ == '__main__':
     output_dir.mkdir(exist_ok=True, parents=True)
 
     try:
-        asyncio.run(main(output_dir, refresh_time))
+        asyncio.run(repeat_main(output_dir, refresh_time))
     except Exception as e:
         logging.exception(f"Unexpected error: {e}")
