@@ -25,6 +25,10 @@
 4. Выгрузка количества цитирования публикаций (по списку).
 5. Отчет по выпадающим публикациям из профиля организации.
 
+**Архитектура**
+
+![struct-functional](https://github.com/KarpovAA/otus-homework-2020/blob/master/ScopusApi/struct-functional.jpg)
+
 **API интерфейс Scopus**
 Документацияю по API Scopus можно найти по адресу https://dev.elsevier.com/api_docs.html.
 Для взаимодействия с API Scopus используем библиотеку **elsapy** (https://github.com/ElsevierDev/elsapy).
